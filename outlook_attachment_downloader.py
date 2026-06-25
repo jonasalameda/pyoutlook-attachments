@@ -229,7 +229,12 @@ def save_attachments(item, attachments, output_root, args, extensions, stats):
         target_dir.mkdir(parents=True, exist_ok=True)
         dest = unique_path(dest)
         try:
-            att.SaveAsFile(str(dest))
+            # SaveAsFile is a COM call into the separate OUTLOOK.EXE process.
+            # It resolves relative paths against *its own* working directory,
+            # not this script's -- so this MUST be an absolute path, or every
+            # save fails with a misleading "Path does not exist" error even
+            # though the folder was just created successfully above.
+            att.SaveAsFile(str(dest.resolve()))
             print(f"  saved: {dest}")
             stats.attachments_saved += 1
             saved_any = True
@@ -250,7 +255,7 @@ def process_folder(folder, output_root, args, since_dt, until_dt, extensions, st
     print(f'Scanning "{folder.Name}" ({items.Count} items)...')
 
     # Snapshot into a plain list: mutating-while-iterating a live Outlook
-    # collection (e.g. via --mark-read) can otherwise skip items.
+    # collection can otherwise skip items.
     for item in list(items):
         if args.max_emails and stats.emails_matched >= args.max_emails:
             return
@@ -282,7 +287,11 @@ def process_folder(folder, output_root, args, since_dt, until_dt, extensions, st
         saved_any = save_attachments(item, attachments, output_root, args, extensions, stats)
         if saved_any:
             stats.emails_matched += 1
-            if args.mark_read and not args.dry_run:
+            # Mark as read whenever we actually saved something from this
+            # email -- setting UnRead = False is a harmless no-op if it was
+            # already read, so this just guarantees "read" without needing
+            # to check the current state first.
+            if not args.dry_run and not args.no_mark_read:
                 try:
                     item.UnRead = False
                 except Exception:
@@ -331,7 +340,10 @@ def build_parser():
     parser.add_argument("--organize", choices=["flat", "by-email", "by-date"], default="by-email")
     parser.add_argument("--recursive", action="store_true", help="Also scan subfolders of each --folder")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
-    parser.add_argument("--mark-read", action="store_true", dest="mark_read", help="Mark matched emails as read")
+    parser.add_argument(
+        "--no-mark-read", action="store_true", dest="no_mark_read",
+        help="Don't mark matched emails as read (read-marking happens by default whenever an attachment is saved)",
+    )
     parser.add_argument(
         "--list-folders", action="store_true", dest="list_folders",
         help="Print the full folder tree for the signed-in profile(s) and exit",
@@ -384,7 +396,12 @@ def main():
         print("No valid folders to scan. Try --list-folders to see what's available.", file=sys.stderr)
         sys.exit(1)
 
-    output_root = Path(args.output)
+    # IMPORTANT: resolve to an absolute path. SaveAsFile is a COM call into
+    # Outlook's own process, which resolves relative paths against its own
+    # working directory rather than this script's -- a relative --output
+    # (e.g. the "attachments" default) makes every single SaveAsFile call
+    # fail with a misleading "Path does not exist" error.
+    output_root = Path(args.output).resolve()
     if not args.dry_run:
         output_root.mkdir(parents=True, exist_ok=True)
 

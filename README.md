@@ -50,7 +50,7 @@ python outlook_attachment_downloader.py --folder Inbox --folder "Inbox/Invoices"
 | Flag | Description |
 |---|---|
 | `--folder` / `-f` | Outlook folder path, e.g. `Inbox` or `Inbox/Invoices`. Repeatable. Default: `Inbox`. |
-| `--output` / `-o` | Output directory. Default: `./attachments`. |
+| `--output` / `-o` | Output directory. Default: `./attachments`. Always resolved to an absolute path internally (see gotcha below). |
 | `--since YYYY-MM-DD` | Only emails received on/after this date. |
 | `--until YYYY-MM-DD` | Only emails received on/before this date. |
 | `--sender TEXT` | Substring match against sender name or email address. |
@@ -62,11 +62,25 @@ python outlook_attachment_downloader.py --folder Inbox --folder "Inbox/Invoices"
 | `--organize` | `by-email` (default, one subfolder per email), `by-date`, or `flat`. |
 | `--recursive` | Also scan subfolders of each `--folder`. |
 | `--dry-run` | Show what would be saved without writing anything. |
-| `--mark-read` | Mark matched emails as read afterward. |
+| `--no-mark-read` | Skip marking matched emails as read (marking read is the default whenever an attachment is actually saved). |
 | `--list-folders` | Print the full folder tree and exit. |
 
 ## Notes / gotchas
 
+- **Matched emails are marked read by default.** Whenever an attachment
+  actually gets saved from an email, that email is set to read (`UnRead =
+  False`) afterward -- harmless if it was already read. Use
+  `--no-mark-read` if you want to leave read/unread state untouched.
+- **Relative `--output` paths used to fail every save.** `Attachment.SaveAsFile()`
+  is a COM call into the separate OUTLOOK.EXE process, which resolves a
+  relative path against *its own* working directory, not this script's.
+  That produced a 100%-failure pattern: Python's `mkdir()` happily creates
+  the folder (in your script's cwd), but Outlook then looks for that same
+  relative path somewhere else and reports `Cannot save the attachment.
+  Path does not exist.` — even though the folder really does exist. Fixed
+  by resolving `--output` to an absolute path before anything touches it.
+  If you ever see that exact error again, an absolute path is the first
+  thing to check.
 - **Inline images are attachments too.** Outlook stores signature logos
   and embedded images as hidden attachments. They're skipped by default;
   use `--include-inline` if you actually want them.
@@ -78,9 +92,47 @@ python outlook_attachment_downloader.py --folder Inbox --folder "Inbox/Invoices"
   very large folders.
 - **Running this on a server / scheduled task:** COM automation against
   Outlook generally needs an interactive desktop session for the signed-in
-  profile (similar to the constraints you ran into with the serial-port
-  permissions issue on the Smart Store project, just a different flavor
-  of "needs the right session/context"). It's not a great fit for a
-  headless service account. If you eventually need unattended/server-side
-  access, that's exactly the case for switching to the Microsoft
-  Graph + `O365` (Apache 2.0) path instead.
+  profile. It's not a great fit for a headless service account. If you
+  eventually need unattended/server-side access, that's exactly the case
+  for switching to the Microsoft Graph + `O365` (Apache 2.0) path instead.
+
+## Building a standalone .exe (for users without Python)
+
+Same approach as the PDF bookmark tool: PyInstaller bundles the script
+and a Python runtime into one `.exe`, so recipients don't need Python
+installed at all.
+
+**I can't hand you the actual binary from here** — PyInstaller doesn't
+cross-compile, so a Windows `.exe` has to be built on Windows. That's not
+really an extra burden though, since this script already has to run on
+Windows (it talks to the local Outlook COM interface), so you'll be
+building it on the same machine where you've been testing it.
+
+### Steps
+
+1. On that Windows machine: `pip install pyinstaller`
+2. Run `build_exe.bat` (included), or directly:
+   ```
+   pyinstaller --onefile --name outlook_attachment_downloader --hidden-import win32timezone outlook_attachment_downloader.py
+   ```
+3. Grab `dist\outlook_attachment_downloader.exe` — that single file is
+   what you hand to other people.
+
+### What the .exe does and doesn't remove
+
+- **Removes:** the need for Python/pip to be installed.
+- **Does NOT remove:** the need for Outlook desktop to be installed and
+  signed in on whoever's machine runs it. This is still COM automation
+  against a local, signed-in Outlook profile — each person running the
+  `.exe` pulls attachments from *their own* signed-in mailbox, not a
+  shared one. Centrally pulling attachments out of *other* people's
+  mailboxes is a different job (the Microsoft Graph + `O365` path
+  mentioned above), not something this `.exe` does.
+
+### Heads-up: SmartScreen / antivirus
+
+Unsigned PyInstaller `--onefile` executables get flagged by Windows
+Defender SmartScreen or other antivirus as "unrecognized" fairly often —
+a well-known false positive for this packaging style, not a sign of an
+actual problem. Recipients may need to click "More info" → "Run anyway."
+Code-signing the exe avoids this if you're distributing it widely.
