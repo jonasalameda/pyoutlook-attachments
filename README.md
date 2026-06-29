@@ -29,11 +29,37 @@ Everything else the script uses is the Python standard library.
 ```bash
 pip install -r requirements.txt
 
+python outlook_attachment_downloader.py
+```
+
+Run it with no arguments and it stays open, connected to Outlook once,
+prompting for commands until you tell it to stop:
+
+```
+Outlook Attachment Downloader -- interactive mode
+Type a command using the same flags as the command line, e.g.:
+  --sender alice@example.com --since 2026-06-01 --extensions pdf
+Type "help" for the full list of options, "exit" or "quit" to leave.
+
+outlook> --since 2026-05-22
+Scanning "Inbox" (47 items)...
+  saved: C:\...\attachments\20260524_0931_Bob_Invoice\invoice.pdf
+...
+outlook> --sender alice@example.com --extensions pdf,xlsx --organize flat
+...
+outlook> exit
+Goodbye.
+```
+
+Every flag below works exactly the same way whether you type it after the
+`outlook>` prompt or pass it on the command line in one shot:
+
+```bash
+# Single-shot mode still works too -- pass any flags and it runs once and exits
+python outlook_attachment_downloader.py --since 2026-05-22
+
 # Not sure of your exact folder names/paths? List them first.
 python outlook_attachment_downloader.py --list-folders
-
-# Save every attachment from the Inbox into ./attachments
-python outlook_attachment_downloader.py
 
 # Last 30 days only
 python outlook_attachment_downloader.py --since 2026-05-22
@@ -120,7 +146,9 @@ building it on the same machine where you've been testing it.
 
 ### What the .exe does and doesn't remove
 
-- **Removes:** the need for Python/pip to be installed.
+- **Removes:** the need for Python/pip to be installed. Double-clicking
+  the `.exe` now drops you into the interactive prompt instead of running
+  once with default settings and immediately closing the window.
 - **Does NOT remove:** the need for Outlook desktop to be installed and
   signed in on whoever's machine runs it. This is still COM automation
   against a local, signed-in Outlook profile — each person running the
@@ -136,3 +164,59 @@ Defender SmartScreen or other antivirus as "unrecognized" fairly often —
 a well-known false positive for this packaging style, not a sign of an
 actual problem. Recipients may need to click "More info" → "Run anyway."
 Code-signing the exe avoids this if you're distributing it widely.
+
+## GUI version
+
+`outlook_attachment_downloader_gui.py` is a windowed front-end for the
+same tool. It imports and reuses the core logic from
+`outlook_attachment_downloader.py` directly (folder traversal, filtering,
+saving, stats) — both files need to be in the same folder.
+
+**No new dependencies.** The GUI is built entirely with `tkinter`/`ttk`,
+which ship with the Python standard library — the bindings are
+PSF-licensed, the underlying Tcl/Tk is BSD-style licensed, both fully
+permissive for commercial use. No third-party GUI toolkit was added,
+since tkinter already covers everything needed (tabs, a folder tree, the
+output-folder picker dialog) with no extra weight or license surface.
+
+### Running it
+
+```bash
+python outlook_attachment_downloader_gui.py
+```
+
+- **Filters & Options tab** — every CLI filter (sender, subject, date
+  range, extensions, max emails, unread-only, include-inline, dry-run,
+  mark-as-read, organize mode) as entries/checkboxes/radio buttons.
+- **Outlook Folder tab** — click **Load Folders** to connect to Outlook
+  and show the top level of your folder tree. Folders load lazily: a
+  folder's children are only fetched the first time you expand it, not
+  all up front, so this stays fast even on large mailboxes. Ctrl/Shift-click
+  to select more than one folder; check **Include subfolders** to also
+  scan everything under your selection. Nothing selected → defaults to
+  Inbox, same as the CLI.
+- **Output folder** — shown at the bottom, defaults to the same
+  `./attachments` the CLI uses. Click **Change...** to pick a different
+  folder; otherwise it just uses the default.
+- **Download Attachments** — runs on a background thread so the window
+  doesn't freeze on large folders, and disables itself while running.
+  Progress and the final summary stream into the **Activity Log** panel
+  at the bottom, visible no matter which tab you're on.
+
+Date fields use the same `YYYY-MM-DD` format as the CLI (no calendar
+picker, by design — see the GUI section in the build notes above for why).
+
+### Building a standalone .exe
+
+Same idea as the CLI build, but with `build_gui_exe.bat` / the `--windowed`
+flag instead, since this is a real GUI now and shouldn't pop a console
+box alongside it:
+
+```
+pyinstaller --onefile --windowed --name outlook_attachment_downloader_gui --hidden-import win32timezone outlook_attachment_downloader_gui.py
+```
+
+Both `.py` files need to be in the folder when you build (PyInstaller
+bundles the imported core module automatically), but the resulting
+`.exe` is fully standalone — recipients only need that one file, plus
+Outlook installed and signed in, same as always.

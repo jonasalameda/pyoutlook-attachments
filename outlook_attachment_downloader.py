@@ -19,7 +19,10 @@ permissive -- commercial use is fine). Everything else used here is the
 Python standard library.
 
 Examples:
-    # Everything received in the last 30 days, default Inbox
+    # No arguments: stays open, prompts for commands until you type exit/quit
+    python outlook_attachment_downloader.py
+
+    # Everything received in the last 30 days, default Inbox (single-shot)
     python outlook_attachment_downloader.py --since 2026-05-22
 
     # Only PDFs/Excel files from one sender, all in one flat folder
@@ -35,6 +38,7 @@ Examples:
 import argparse
 import datetime
 import re
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -351,31 +355,21 @@ def build_parser():
     return parser
 
 
-def main():
-    args = build_parser().parse_args()
-
-    if sys.platform != "win32":
-        print(
-            "This tool requires Windows with Outlook desktop installed (it uses COM automation).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    try:
-        import win32com.client
-    except ImportError:
-        print("pywin32 is not installed. Run: pip install pywin32", file=sys.stderr)
-        sys.exit(1)
-
-    outlook = win32com.client.Dispatch("Outlook.Application")
-    namespace = outlook.GetNamespace("MAPI")
-
+def run_command(namespace, args):
+    """Execute one fully-parsed command (a single download pass) against an
+    already-connected Outlook namespace. Used by both single-shot CLI
+    invocation and each line typed in interactive mode."""
     if args.list_folders:
         print_folder_tree(namespace)
         return
 
-    since_dt = parse_date(args.since) if args.since else None
-    until_dt = parse_date(args.until, end_of_day=True) if args.until else None
+    try:
+        since_dt = parse_date(args.since) if args.since else None
+        until_dt = parse_date(args.until, end_of_day=True) if args.until else None
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return
+
     extensions = (
         {e.strip().lower().lstrip(".") for e in args.extensions.split(",")}
         if args.extensions else None
@@ -394,7 +388,7 @@ def main():
 
     if not folders_to_scan:
         print("No valid folders to scan. Try --list-folders to see what's available.", file=sys.stderr)
-        sys.exit(1)
+        return
 
     # IMPORTANT: resolve to an absolute path. SaveAsFile is a COM call into
     # Outlook's own process, which resolves relative paths against its own
@@ -412,6 +406,86 @@ def main():
         process_folder(folder, output_root, args, since_dt, until_dt, extensions, stats)
 
     print_summary(stats, dry_run=args.dry_run)
+
+
+def run_interactive(namespace):
+    """Keep one Outlook COM connection alive and repeatedly prompt for
+    commands using the exact same flags as the command line, until the
+    user exits. This is also what runs when the packaged .exe is launched
+    by double-clicking -- without it, the console window would just flash
+    and close after one default, argument-less run."""
+    parser = build_parser()
+
+    print("Outlook Attachment Downloader -- interactive mode")
+    print("Type a command using the same flags as the command line, e.g.:")
+    print('  --sender alice@example.com --since 2026-06-01 --extensions pdf')
+    print('Type "help" for the full list of options, "exit" or "quit" to leave.\n')
+
+    while True:
+        try:
+            line = input("outlook> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+
+        if not line:
+            continue
+        if line.lower() in ("exit", "quit", "q"):
+            break
+        if line.lower() in ("help", "-h", "--help"):
+            parser.print_help()
+            continue
+
+        try:
+            tokens = shlex.split(line)
+        except ValueError as e:
+            print(f"Could not parse that line: {e}")
+            continue
+
+        try:
+            args = parser.parse_args(tokens)
+        except SystemExit:
+            # argparse prints its own error/usage and calls sys.exit() on a
+            # bad flag -- swallow that so a typo doesn't kill the session.
+            continue
+
+        try:
+            run_command(namespace, args)
+        except Exception as e:
+            print(f"Error while running that command: {e}", file=sys.stderr)
+
+        print()  # blank line between commands for readability
+
+    print("Goodbye.")
+
+
+def main():
+    if sys.platform != "win32":
+        print(
+            "This tool requires Windows with Outlook desktop installed (it uses COM automation).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        import win32com.client
+    except ImportError:
+        print("pywin32 is not installed. Run: pip install pywin32", file=sys.stderr)
+        sys.exit(1)
+
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    namespace = outlook.GetNamespace("MAPI")
+
+    argv = sys.argv[1:]
+    if argv:
+        # Backward-compatible single-shot mode: e.g. for scheduled tasks
+        # or scripted calls. Parses once, runs once, exits.
+        args = build_parser().parse_args(argv)
+        run_command(namespace, args)
+        return
+
+    # No arguments: stay open and take commands until told to exit.
+    run_interactive(namespace)
 
 
 if __name__ == "__main__":
