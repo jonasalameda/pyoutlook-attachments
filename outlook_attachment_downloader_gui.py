@@ -40,6 +40,9 @@ from outlook_attachment_downloader import (
     parse_date,
     process_folder,
     print_summary,
+    save_attachments,
+    to_naive,
+    OL_MAIL_ITEM,
 )
 
 DUMMY_TAG = "dummy-loading-node"
@@ -72,6 +75,9 @@ class App:
         self.folder_map = {}    # tree item id -> Outlook Folder COM object
         self.log_queue = queue.Queue()
         self.is_running = False
+
+        # Move target stored as (EntryID, StoreID, Name) when chosen
+        self.move_target = None
 
         self._build_widgets()
         self.root.after(100, self._poll_log_queue)
@@ -132,72 +138,113 @@ class App:
         self._build_log_panel()
 
     def _build_filters_tab(self, parent):
+        # We'll put all filter controls inside a collapsible frame so the
+        # user can hide/show them. A single toggle button controls the
+        # visibility.
+        parent.columnconfigure(0, weight=1)
+
+        header = ttk.Frame(parent)
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(1, weight=1)
+        self.filters_visible = tk.BooleanVar(value=True)
+        self._filters_toggle_btn = ttk.Button(header, text="▼ Filters", width=12, command=self._toggle_filters)
+        self._filters_toggle_btn.grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Show or hide filter options for a cleaner window.", foreground="#555").grid(row=0, column=1, sticky="w", padx=(8,0))
+
+        # Content frame contains all the existing widgets. We'll toggle its
+        # visibility by grid_remove()/grid().
+        self.filters_content = ttk.Frame(parent)
+        self.filters_content.grid(row=1, column=0, sticky="nsew", pady=(8,0))
         for col in (1, 3):
-            parent.columnconfigure(col, weight=1)
+            self.filters_content.columnconfigure(col, weight=1)
 
         row = 0
-        ttk.Label(parent, text="Sender contains:").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(self.filters_content, text="Sender contains:").grid(row=row, column=0, sticky="w", pady=4)
         self.sender_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.sender_var).grid(row=row, column=1, columnspan=3, sticky="ew", padx=(6, 0))
+        ttk.Entry(self.filters_content, textvariable=self.sender_var).grid(row=row, column=1, columnspan=3, sticky="ew", padx=(6, 0))
 
         row += 1
-        ttk.Label(parent, text="Subject contains:").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(self.filters_content, text="Subject contains:").grid(row=row, column=0, sticky="w", pady=4)
         self.subject_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.subject_var).grid(row=row, column=1, columnspan=3, sticky="ew", padx=(6, 0))
+        ttk.Entry(self.filters_content, textvariable=self.subject_var).grid(row=row, column=1, columnspan=3, sticky="ew", padx=(6, 0))
 
         row += 1
-        ttk.Label(parent, text="Since (YYYY-MM-DD):").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(self.filters_content, text="Since (YYYY-MM-DD):").grid(row=row, column=0, sticky="w", pady=4)
         self.since_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.since_var, width=16).grid(row=row, column=1, sticky="w", padx=(6, 0))
+        ttk.Entry(self.filters_content, textvariable=self.since_var, width=16).grid(row=row, column=1, sticky="w", padx=(6, 0))
 
-        ttk.Label(parent, text="Until (YYYY-MM-DD):").grid(row=row, column=2, sticky="w", padx=(12, 0))
+        ttk.Label(self.filters_content, text="Until (YYYY-MM-DD):").grid(row=row, column=2, sticky="w", padx=(12, 0))
         self.until_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.until_var, width=16).grid(row=row, column=3, sticky="w", padx=(6, 0))
+        ttk.Entry(self.filters_content, textvariable=self.until_var, width=16).grid(row=row, column=3, sticky="w", padx=(6, 0))
 
         row += 1
-        ttk.Label(parent, text="Extensions (comma separated):").grid(row=row, column=0, sticky="w", pady=4)
+        ttk.Label(self.filters_content, text="Extensions (comma separated):").grid(row=row, column=0, sticky="w", pady=4)
         self.extensions_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.extensions_var, width=24).grid(row=row, column=1, sticky="w", padx=(6, 0))
+        ttk.Entry(self.filters_content, textvariable=self.extensions_var, width=24).grid(row=row, column=1, sticky="w", padx=(6, 0))
 
-        ttk.Label(parent, text="Max emails (blank = no limit):").grid(row=row, column=2, sticky="w", padx=(12, 0))
+        ttk.Label(self.filters_content, text="Max emails (blank = no limit):").grid(row=row, column=2, sticky="w", padx=(12, 0))
         self.max_emails_var = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.max_emails_var, width=10).grid(row=row, column=3, sticky="w", padx=(6, 0))
+        ttk.Entry(self.filters_content, textvariable=self.max_emails_var, width=10).grid(row=row, column=3, sticky="w", padx=(6, 0))
 
         row += 1
-        ttk.Separator(parent, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
+        ttk.Separator(self.filters_content, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
 
         row += 1
         self.unread_only_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(parent, text="Unread only", variable=self.unread_only_var).grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(self.filters_content, text="Unread only", variable=self.unread_only_var).grid(row=row, column=0, sticky="w", pady=2)
 
         self.include_inline_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            parent, text="Include inline/hidden attachments (e.g. signature images)",
+            self.filters_content, text="Include inline/hidden attachments (e.g. signature images)",
             variable=self.include_inline_var,
         ).grid(row=row, column=1, columnspan=3, sticky="w", pady=2)
 
         row += 1
         self.mark_read_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            parent, text="Mark matched emails as read after saving", variable=self.mark_read_var,
+            self.filters_content, text="Mark matched emails as read after saving", variable=self.mark_read_var,
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
 
         self.dry_run_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            parent, text="Dry run (preview only, save nothing)", variable=self.dry_run_var,
+            self.filters_content, text="Dry run (preview only, save nothing)", variable=self.dry_run_var,
         ).grid(row=row, column=2, columnspan=2, sticky="w", pady=2)
 
         row += 1
-        ttk.Separator(parent, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
+        ttk.Separator(self.filters_content, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
 
         row += 1
-        ttk.Label(parent, text="Organize saved attachments:").grid(row=row, column=0, sticky="w", pady=2)
+        ttk.Label(self.filters_content, text="Organize saved attachments:").grid(row=row, column=0, sticky="w", pady=2)
         self.organize_var = tk.StringVar(value="by-email")
-        organize_frame = ttk.Frame(parent)
+        organize_frame = ttk.Frame(self.filters_content)
         organize_frame.grid(row=row, column=1, columnspan=3, sticky="w")
         ttk.Radiobutton(organize_frame, text="One folder per email", value="by-email", variable=self.organize_var).pack(side="left", padx=(0, 12))
         ttk.Radiobutton(organize_frame, text="One folder per date", value="by-date", variable=self.organize_var).pack(side="left", padx=(0, 12))
         ttk.Radiobutton(organize_frame, text="All in one flat folder", value="flat", variable=self.organize_var).pack(side="left")
+
+        # New: move-processed-emails option with a "Choose..." button that
+        # asks the user which Outlook folder to move matching emails into.
+        row += 1
+        ttk.Separator(self.filters_content, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
+
+        row += 1
+        self.move_emails_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.filters_content, text="Move processed emails to another Outlook folder", variable=self.move_emails_var).grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+        self.move_folder_label_var = tk.StringVar(value="(no folder chosen)")
+        ttk.Label(self.filters_content, textvariable=self.move_folder_label_var, foreground="#555").grid(row=row, column=2, sticky="w")
+        ttk.Button(self.filters_content, text="Choose...", command=self.on_choose_move_folder_clicked).grid(row=row, column=3, sticky="e")
+
+    def _toggle_filters(self):
+        if self.filters_visible.get():
+            # hide
+            self.filters_content.grid_remove()
+            self.filters_visible.set(False)
+            self._filters_toggle_btn.configure(text="▶ Filters")
+        else:
+            # show
+            self.filters_content.grid()
+            self.filters_visible.set(True)
+            self._filters_toggle_btn.configure(text="▼ Filters")
 
     def _build_folder_tab(self, parent):
         parent.columnconfigure(0, weight=1)
@@ -351,6 +398,28 @@ class App:
             self.output_var.set(chosen)
 
     # ------------------------------------------------------------------
+    # Move target selection
+    # ------------------------------------------------------------------
+
+    def on_choose_move_folder_clicked(self):
+        namespace = self.get_namespace()
+        if namespace is None:
+            return
+        try:
+            # Use Outlook's folder picker UI to let the user choose a target folder.
+            chosen = namespace.PickFolder()
+            if chosen is None:
+                return
+            entry_id = getattr(chosen, "EntryID", None)
+            store_id = getattr(chosen, "StoreID", None)
+            name = getattr(chosen, "Name", "?")
+            self.move_target = (entry_id, store_id, name)
+            # Display a readable label for the chosen folder
+            self.move_folder_label_var.set(f"Chosen: {name}")
+        except Exception as e:
+            messagebox.showerror("Could not pick folder", str(e))
+
+    # ------------------------------------------------------------------
     # Download
     # ------------------------------------------------------------------
 
@@ -367,7 +436,7 @@ class App:
             raise ValueError("Max emails must be a positive whole number, or left blank.")
 
     def build_args(self, max_emails):
-        return SimpleNamespace(
+        ns = SimpleNamespace(
             sender=self.sender_var.get().strip() or None,
             subject_contains=self.subject_var.get().strip() or None,
             extensions=self.extensions_var.get().strip() or None,
@@ -378,6 +447,13 @@ class App:
             dry_run=self.dry_run_var.get(),
             no_mark_read=not self.mark_read_var.get(),
         )
+        # Include move options on the namespace so the worker can see them.
+        ns.move_emails = self.move_emails_var.get()
+        if self.move_target:
+            ns.move_entry_id, ns.move_store_id, ns.move_folder_name = self.move_target
+        else:
+            ns.move_entry_id = ns.move_store_id = ns.move_folder_name = None
+        return ns
 
     def on_download_clicked(self):
         if self.is_running:
@@ -441,6 +517,23 @@ class App:
                 namespace = outlook.GetNamespace("MAPI")
 
                 stats = Stats()
+                # If the user asked to move emails, resolve the destination folder
+                move_folder_obj = None
+                if args.move_emails and args.move_entry_id:
+                    try:
+                        if args.move_store_id:
+                            move_folder_obj = namespace.GetFolderFromID(args.move_entry_id, args.move_store_id)
+                        else:
+                            move_folder_obj = namespace.GetFolderFromID(args.move_entry_id)
+                    except Exception as e:
+                        print(f"Could not resolve move-to folder: {e}")
+                        move_folder_obj = None
+
+                # We'll re-implement the core per-folder loop here so we can
+                # move individual MailItems after successful saves. This keeps
+                # the heavy lifting (saving attachments) in the shared
+                # save_attachments() function while avoiding modifying the
+                # core module.
                 for entry_id, store_id, name in folders:
                     if args.max_emails and stats.emails_matched >= args.max_emails:
                         break
@@ -450,9 +543,68 @@ class App:
                             folder = namespace.GetFolderFromID(entry_id, store_id)
                         else:
                             folder = namespace.GetFolderFromID(entry_id)
-                        process_folder(folder, output_root, args, since_dt, until_dt, extensions, stats)
                     except Exception as e:
-                        print(f'Error scanning folder "{name}": {e}')
+                        print(f'Error opening folder "{name}": {e}')
+                        continue
+
+                    try:
+                        items = folder.Items
+                        try:
+                            items.Sort("[ReceivedTime]", True)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        print(f'Error accessing items in "{name}": {e}')
+                        continue
+
+                    print(f'Scanning "{name}" ({getattr(items, "Count", "?")} items)...')
+
+                    for item in list(items):
+                        if args.max_emails and stats.emails_matched >= args.max_emails:
+                            break
+                        stats.emails_scanned += 1
+
+                        if getattr(item, "Class", None) != OL_MAIL_ITEM:
+                            continue
+                        if args.unread_only and not item.UnRead:
+                            continue
+
+                        received = to_naive(getattr(item, "ReceivedTime", None))
+                        if since_dt and received and received < since_dt:
+                            continue
+                        if until_dt and received and received > until_dt:
+                            continue
+
+                        if args.sender:
+                            sender_text = f"{item.SenderName} {item.SenderEmailAddress}".lower()
+                            if args.sender.lower() not in sender_text:
+                                continue
+
+                        if args.subject_contains and args.subject_contains.lower() not in (item.Subject or "").lower():
+                            continue
+
+                        attachments = list(item.Attachments)
+                        if not attachments:
+                            continue
+
+                        saved_any = save_attachments(item, attachments, output_root, args, extensions, stats)
+                        if saved_any:
+                            stats.emails_matched += 1
+                            if not args.dry_run and not args.no_mark_read:
+                                try:
+                                    item.UnRead = False
+                                except Exception:
+                                    pass
+                            # If requested and we resolved a move destination,
+                            # move the message to that folder.
+                            if not args.dry_run and args.move_emails and move_folder_obj is not None:
+                                try:
+                                    item.Move(move_folder_obj)
+                                    print(f'  moved message "{getattr(item, "Subject", "")}" to "{getattr(move_folder_obj, "Name", "?")}"')
+                                except Exception as e:
+                                    print(f'  FAILED to move message "{getattr(item, "Subject", "")}": {e}', file=sys.stderr)
+                                    stats.errors += 1
+
                 print_summary(stats, dry_run=args.dry_run)
             finally:
                 sys.stdout, sys.stderr = old_out, old_err
