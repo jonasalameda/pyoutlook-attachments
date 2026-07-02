@@ -506,15 +506,53 @@ class App:
             self.log_queue.put(("done", None))
             return
 
-        # Initialize COM on this thread
-        pythoncom.CoInitialize()
+        # Initialize COM on this thread with apartment model for improved stability
+        try:
+            pythoncom.CoInitializeEx(pythoncom.COINIT_MULTITHREADED)
+        except Exception:
+            # If COINIT_MULTITHREADED fails, try single-threaded
+            try:
+                pythoncom.CoInitialize()
+            except Exception as init_err:
+                self.log_queue.put(("text", f"COM initialization failed: {init_err}\n"))
+                self.log_queue.put(("done", None))
+                return
+
         try:
             old_out, old_err = sys.stdout, sys.stderr
             sys.stdout = sys.stderr = QueueWriter(self.log_queue)
             try:
                 # Create a separate Outlook Application/Namespace in this thread
-                outlook = win32com.client.Dispatch("Outlook.Application")
-                namespace = outlook.GetNamespace("MAPI")
+                # with error handling for "Server execution failed" errors
+                outlook = None
+                namespace = None
+                
+                try:
+                    outlook = win32com.client.Dispatch("Outlook.Application")
+                    namespace = outlook.GetNamespace("MAPI")
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    # "Server execution failed" typically means COM object marshalling issue
+                    # Try again with a slight delay
+                    if "execution" in error_msg or "server" in error_msg:
+                        import time
+                        time.sleep(0.5)
+                        try:
+                            outlook = win32com.client.Dispatch("Outlook.Application")
+                            namespace = outlook.GetNamespace("MAPI")
+                        except Exception as retry_err:
+                            print(f"Outlook connection failed (after retry): {retry_err}")
+                            self.log_queue.put(("done", None))
+                            return
+                    else:
+                        print(f"Outlook connection failed: {e}")
+                        self.log_queue.put(("done", None))
+                        return
+
+                if namespace is None:
+                    print("Failed to initialize Outlook namespace")
+                    self.log_queue.put(("done", None))
+                    return
 
                 stats = Stats()
                 # If the user asked to move emails, resolve the destination folder
@@ -612,7 +650,10 @@ class App:
             # Any unexpected exception — print so it lands in the log widget
             self.log_queue.put(("text", f"Unexpected error: {e}\n"))
         finally:
-            pythoncom.CoUninitialize()
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
             self.log_queue.put(("done", None))
 
     def _set_running(self, running):
